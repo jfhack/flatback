@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "flatback"
+version = "1.0"
+description = "Backup and restore Flatpak applications for offline transfer"
+readme = "README.md"
+requires-python = ">=3.8"
+dependencies = [
+    "pyyaml",
+]
+
+[project.urls]
+Homepage = "https://github.com/jfhack/flatback"
+
+[project.scripts]
+flatback = "flatback.__main__:main"
