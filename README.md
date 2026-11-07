@@ -41,6 +41,8 @@ flatback restore org.popular.emulator.tar.gz --no-data
 
 **Restore** extracts the archive, reads the manifest, and installs the runtime and app bundles using `flatpak install --bundle`.
 
+> **Only restore backups you created or trust.** A backup installs software and can replace `~/.var/app/<app_id>`. As a safeguard, restore rejects manifests whose bundle names are not plain files inside the backup or whose `app_id` is not a valid Flatpak ID, and skips user-data symlinks that point outside `~/.var/app/<app_id>`.
+
 ### Manifest Example (`flatback.yml`)
 
 ```yaml

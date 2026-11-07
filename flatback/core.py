@@ -1,3 +1,4 @@
+import re
 import subprocess
 import yaml
 import shutil
@@ -6,6 +7,25 @@ import tempfile
 from pathlib import Path
 
 from . import __version__
+
+
+_APP_ID_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_-]*(?:\.[A-Za-z_-][A-Za-z0-9_-]*){2,}")
+
+
+def is_valid_app_id(app_id):
+    return isinstance(app_id, str) and len(app_id) <= 255 and _APP_ID_RE.fullmatch(app_id) is not None
+
+def _is_within(path, base):
+    try:
+        Path(path).relative_to(base)
+        return True
+    except ValueError:
+        return False
+
+
+def _ignore_special_files(src_dir, names):
+    paths = (Path(src_dir) / name for name in names)
+    return {p.name for p in paths if not (p.is_symlink() or p.is_dir() or p.is_file())}
 
 
 class FlatpakRef:
@@ -159,7 +179,7 @@ class Backup:
                 out = Path(output_path or default_name)
                 if out.exists():
                     shutil.rmtree(out)
-                shutil.copytree(tmp_dir, out)
+                shutil.copytree(tmp_dir, out, symlinks=True)
 
             print(f"Backup saved to: {out}")
             return out
@@ -171,7 +191,7 @@ class Backup:
             return False
         dst = tmp_dir / self.DATA_DIR
         print(f"Copying user data: {src}")
-        shutil.copytree(src, dst, symlinks=True)
+        shutil.copytree(src, dst, symlinks=True, ignore=_ignore_special_files)
         return True
 
     def _pack_tar(self, source_dir, tar_path):
@@ -202,7 +222,7 @@ class Restore:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
             with tarfile.open(tar_path, "r:gz") as tar:
-                tar.extractall(tmp_dir, filter="data")
+                tar.extractall(tmp_dir, filter=self._data_filter)
             self._load_from_dir(tmp_dir)
 
     def _load_from_dir(self, directory):
@@ -212,12 +232,16 @@ class Restore:
 
         with open(manifest_path) as f:
             manifest = yaml.safe_load(f)
+        if not isinstance(manifest, dict):
+            raise ValueError(f"Invalid manifest: {manifest_path}")
 
-        runtime_bundle = directory / manifest["runtime_bundle"]
-        app_bundle = directory / manifest["app_bundle"]
+        runtime_bundle = self._bundle_path(directory, manifest.get("runtime_bundle"), "runtime_bundle")
+        app_bundle = self._bundle_path(directory, manifest.get("app_bundle"), "app_bundle")
 
         runtime_ref = FlatpakRef.from_dict(manifest["runtime"])
         app_ref = FlatpakRef.from_dict(manifest["app"])
+        if not is_valid_app_id(app_ref.app_id):
+            raise ValueError(f"Invalid app_id in manifest: {app_ref.app_id!r}")
 
         print(f"Installing runtime: {runtime_ref.ref}")
         self._install_bundle(runtime_bundle)
@@ -230,9 +254,43 @@ class Restore:
 
         print(f"Restore complete: {app_ref.app_id}")
 
+    @staticmethod
+    def _data_filter(member, path):
+        try:
+            return tarfile.data_filter(member, path)
+        except tarfile.FilterError as e:
+            print(f"Skipping unsafe archive entry: {e}")
+            return None
+
+    @staticmethod
+    def _bundle_path(directory, name, field):
+        if not isinstance(name, str) or name in ("", ".", "..") or Path(name).name != name:
+            raise ValueError(f"Invalid {field} in manifest: {name!r}")
+        path = directory / name
+        if not _is_within(path.resolve(), directory.resolve()):
+            raise ValueError(f"{field} points outside the backup: {name!r}")
+        if not path.is_file():
+            raise FileNotFoundError(f"Bundle not found in backup: {path}")
+        return path
+
+    @staticmethod
+    def _remove_escaping_symlinks(root):
+        root = root.resolve()
+        for link in [p for p in root.rglob("*") if p.is_symlink()]:
+            try:
+                target = link.resolve()
+            except (OSError, RuntimeError):
+                target = None
+            if target is None or not _is_within(target, root):
+                print(f"Removed symlink pointing outside the app data: {link.relative_to(root)} -> {target or 'symlink loop'}")
+                link.unlink()
+
     def _handle_user_data(self, directory, app_id):
         data_dir = directory / self.DATA_DIR
         if not data_dir.exists():
+            return
+        if data_dir.is_symlink() or not data_dir.is_dir():
+            print(f"Skipping user data: {data_dir} is not a regular directory")
             return
 
         should_restore = self._restore_data
@@ -249,7 +307,8 @@ class Restore:
             print(f"Replacing existing user data: {dst}")
             shutil.rmtree(dst)
         print(f"Restoring user data to: {dst}")
-        shutil.copytree(data_dir, dst, symlinks=True)
+        shutil.copytree(data_dir, dst, symlinks=True, ignore=_ignore_special_files)
+        self._remove_escaping_symlinks(dst)
 
     def _install_bundle(self, bundle_path):
         result = subprocess.run(
